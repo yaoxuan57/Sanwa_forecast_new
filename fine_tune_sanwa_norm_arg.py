@@ -919,6 +919,11 @@ def main(args):
         test_model = LitForecast(test_args, norm_stats)
         test_model.load_state_dict(ck["state_dict"], strict=False)
         test_model.args.ckpt_dir = ckpt_dir
+        
+        # CRITICAL: Ensure norm_stats buffers are set correctly (not overwritten by checkpoint)
+        for k, v in norm_stats.items():
+            if torch.is_tensor(v):
+                setattr(test_model, k, v.to("cpu"))  # explicitly set buffers
 
         test_trainer = pl.Trainer(
             accelerator="gpu",
