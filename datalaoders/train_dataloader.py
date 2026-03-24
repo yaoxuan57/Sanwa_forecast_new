@@ -140,7 +140,7 @@ class PHMDataset(Dataset):
 
             y_vals = labels.values.to_numpy(zero_copy_only=False)
             y_vals = y_vals.astype(np.float32, copy=False)
-            y_np = y_vals.reshape(tbl.num_rows, H, C)  # (N,C,H)
+            y_np = y_vals.reshape(tbl.num_rows, H, C).transpose(0, 2, 1)  # (N, C, H)
             self.y_data = torch.from_numpy(y_np)
 
         # ---- orig_row ----
