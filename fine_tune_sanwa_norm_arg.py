@@ -340,16 +340,21 @@ class LitForecast(pl.LightningModule):
         order = np.argsort(orig)
         pred, true, orig = pred[order], true[order], orig[order]
 
+        # Reshape to (N, C*H) with all values for channel 1, then channel 2, etc
+        N, C, H = pred.shape
+        pred_flat = pred.transpose(0,1,2).reshape(N, C*H)
+        true_flat = true.transpose(0,1,2).reshape(N, C*H)
+
         ckpt_dir = os.path.abspath(self.args.ckpt_dir)
         os.makedirs(ckpt_dir, exist_ok=True)
 
-        np.save(os.path.join(ckpt_dir, "test_preds.npy"), pred)
-        np.save(os.path.join(ckpt_dir, "test_targets.npy"), true)
+        np.save(os.path.join(ckpt_dir, "test_preds.npy"), pred_flat)
+        np.save(os.path.join(ckpt_dir, "test_targets.npy"), true_flat)
         np.save(os.path.join(ckpt_dir, "test_orig_row.npy"), orig)
 
         rmse_all = float(np.sqrt(np.mean((pred - true) ** 2)))
         print(f"[OK] Saved FULL test outputs to {ckpt_dir}")
-        print(f"     pred={pred.shape} true={true.shape} orig={orig.shape} rmse={rmse_all:.6f}")
+        print(f"     pred={pred_flat.shape} true={true_flat.shape} orig={orig.shape} rmse={rmse_all:.6f}")
 
         self._test_pred, self._test_true, self._test_orig = [], [], []
 
