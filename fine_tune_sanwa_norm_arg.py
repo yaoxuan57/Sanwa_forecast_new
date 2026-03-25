@@ -344,7 +344,7 @@ class LitForecast(pl.LightningModule):
         os.makedirs(ckpt_dir, exist_ok=True)
 
         np.save(os.path.join(ckpt_dir, "test_preds.npy"), pred)
-        np.save(os.path.join(ckpt_dir, "test_targets.npy"), invert_y(true, self._buffered_norm()))
+        np.save(os.path.join(ckpt_dir, "test_targets.npy"), true)
         np.save(os.path.join(ckpt_dir, "test_orig_row.npy"), orig)
 
         rmse_all = float(np.sqrt(np.mean((pred - true) ** 2)))
