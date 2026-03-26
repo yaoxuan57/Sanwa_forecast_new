@@ -340,10 +340,10 @@ class LitForecast(pl.LightningModule):
         order = np.argsort(orig)
         pred, true, orig = pred[order], true[order], orig[order]
 
-        # Reshape to (N, C*H) with all values for channel 1, then channel 2, etc
+        # Reshape to (N, H*C) with all values for channel 1 at t+1..t+H, then channel 2, etc (match parquet)
         N, C, H = pred.shape
-        pred_flat = pred.transpose(0,1,2).reshape(N, C*H)
-        true_flat = true.transpose(0,1,2).reshape(N, C*H)
+        pred_flat = pred.transpose(0,2,1).reshape(N, H*C)
+        true_flat = true.transpose(0,2,1).reshape(N, H*C)
 
         ckpt_dir = os.path.abspath(self.args.ckpt_dir)
         os.makedirs(ckpt_dir, exist_ok=True)
