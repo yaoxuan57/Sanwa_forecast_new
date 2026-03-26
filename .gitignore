@@ -1,2 +1,7 @@
 # large data
 *.parquet
+result/test_preds.npy
+result/test_targets.npy
+result/test_orig_row.npy
+*.xlsx
+data/
