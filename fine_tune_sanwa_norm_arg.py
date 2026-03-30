@@ -283,7 +283,7 @@ class LitForecast(pl.LightningModule):
         pred = self.model.predict(feats).float()  # (B,C,H)
         y = y.float()
 
-        loss = F.smooth_l1_loss(pred, y, beta=self.loss_beta)
+        loss = F.l1_loss(pred, y)  # L1 loss
 
         # RMSE in original units (invert y_norm)
         pred_o = invert_y(pred, self._buffered_norm())

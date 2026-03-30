@@ -99,9 +99,12 @@ class Transformer_bkbone(L.LightningModule):
             for p in self.pretrain_head.parameters():
                 p.requires_grad = False
 
-        # Heads
-        # NOTE: we use mean+max pooling => per-channel feature dim = 2*embed_dim
-        per_ch_dim = 2 * args.embed_dim
+        # Attention pooling layer for per-channel features
+        self.attn_pool = nn.Sequential(
+            nn.Linear(args.embed_dim, 1),
+            nn.Softmax(dim=1)
+        )
+        per_ch_dim = args.embed_dim  # attention pooling outputs weighted sum, not concat
 
         # FD head mixes channels
         self.cls_in_dim = args.num_channels * per_ch_dim
@@ -145,16 +148,17 @@ class Transformer_bkbone(L.LightningModule):
         C = self.args.num_channels
         P = T // C
 
-        f = features.view(B, C, P, D)          # (B,C,P,D)
-        f_mean = f.mean(dim=2)                 # (B,C,D)
-        f_max = f.max(dim=2).values            # (B,C,D)
-        f = torch.cat([f_mean, f_max], dim=-1) # (B,C,2D)
+        f = features.view(B, C, P, D)  # (B,C,P,D)
+        # Attention pooling over P (patches) for each channel
+        attn_weights = self.attn_pool[0](f)  # (B,C,P,1)
+        attn_weights = torch.softmax(attn_weights, dim=2)  # (B,C,P,1)
+        f_attn = (f * attn_weights).sum(dim=2)  # (B,C,D)
 
         if self.args.task_type == "FD":
-            z = f.reshape(B, C * f.shape[-1])  # (B, C*2D)
+            z = f_attn.reshape(B, C * f_attn.shape[-1])  # (B, C*D)
             return self.cls_head(z)
         else:
-            return self.reg_head(f)            # (B,C,H)
+            return self.reg_head(f_attn)  # (B,C,H)
 
     # Optional pretrain funcs kept
     def cl_pretrain(self, x):
