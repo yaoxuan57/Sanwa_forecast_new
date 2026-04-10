@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from sklearn.metrics import classification_report
 
 import torch
+import torch.nn.functional as F
 import pytorch_lightning as pl
 from torchmetrics import MetricCollection
 from pytorch_lightning.callbacks import ModelCheckpoint, EarlyStopping, TQDMProgressBar
@@ -19,6 +20,40 @@ from torchmetrics.regression import MeanSquaredError
 from datalaoders.train_dataloader import get_datasets
 from model.model import Transformer_bkbone
 from utils import save_copy_of_files, str2bool, get_rul_report, scoring_function_v2
+
+
+def minmax_fit_vec(y_np, eps=1e-8):
+    y = np.asarray(y_np, dtype=np.float32)
+    y_min = y.min(axis=0)
+    y_max = y.max(axis=0)
+    scale = (y_max - y_min) + eps
+    return y_min, y_max, scale
+
+
+def minmax_apply_pm1_vec(y_np, y_min, scale):
+    y = np.asarray(y_np, dtype=np.float32)
+    y01 = (y - y_min) / scale
+    return (2.0 * y01 - 1.0).astype(np.float32)
+
+
+def fit_channel_zscore_torch(x: torch.Tensor, eps: float = 1e-6):
+    x = x.float()
+    mean = x.mean(dim=(0, 2), keepdim=True)
+    std = x.std(dim=(0, 2), keepdim=True, unbiased=False)
+    std = torch.clamp(std, min=eps)
+    return mean, std
+
+
+def fit_channel_minmax_torch(x: torch.Tensor, eps: float = 1e-6):
+    x = x.float()
+    x_min = x.amin(dim=(0, 2), keepdim=True)
+    x_max = x.amax(dim=(0, 2), keepdim=True)
+    scale = torch.clamp(x_max - x_min, min=eps)
+    return x_min, scale
+
+
+def apply_channel_minmax11_torch(x: torch.Tensor, x_min: torch.Tensor, scale: torch.Tensor):
+    return 2.0 * ((x.float() - x_min) / scale) - 1.0
 
 # def minmax_fit_vec(y_np, eps=1e-8):
 #     y = np.asarray(y_np, dtype=np.float32)          # [N, C]
@@ -147,6 +182,39 @@ class Model(pl.LightningModule):
         self.test_preds = []
         self.test_targets = []
 
+    def _rul_composite_loss(self, preds, y):
+        # Point term: robust value matching with Huber/SmoothL1.
+        point = F.smooth_l1_loss(preds, y, beta=self.args.huber_beta, reduction="mean")
+
+        # First difference term: align local trend/direction.
+        if preds.size(-1) >= 2:
+            d_pred = preds[..., 1:] - preds[..., :-1]
+            d_true = y[..., 1:] - y[..., :-1]
+            diff = torch.mean((d_pred - d_true) ** 2)
+        else:
+            diff = preds.new_tensor(0.0)
+
+        # Second difference term: align turning/curvature behavior.
+        if preds.size(-1) >= 3:
+            dd_pred = preds[..., 2:] - 2.0 * preds[..., 1:-1] + preds[..., :-2]
+            dd_true = y[..., 2:] - 2.0 * y[..., 1:-1] + y[..., :-2]
+            curvature = torch.mean((dd_pred - dd_true) ** 2)
+        else:
+            curvature = preds.new_tensor(0.0)
+
+        # Variance term: discourage overly flat predictions.
+        pred_std = torch.std(preds, dim=-1, unbiased=False)
+        true_std = torch.std(y, dim=-1, unbiased=False)
+        variance = torch.mean((pred_std - true_std) ** 2)
+
+        total = (
+            self.args.point_loss_weight * point
+            + self.args.diff_loss_weight * diff
+            + self.args.curvature_loss_weight * curvature
+            + self.args.variance_loss_weight * variance
+        )
+        return total, point, diff, curvature, variance
+
     def forward(self, x):
         return self.model(x)
 
@@ -207,8 +275,8 @@ class Model(pl.LightningModule):
             preds = self.model.predict(feats).float()   # [B, C]
             y = y.float()                               # [B, C]
 
-            # loss in normalized space
-            loss = self.loss_fn(preds, y)
+            # Composite loss in normalized space.
+            loss, point_loss, diff_loss, curvature_loss, variance_loss = self._rul_composite_loss(preds, y)
 
             # inverse-transform for metrics/reporting (original units)
             y_min  = getattr(self.args, "y_min", 0.0)
@@ -250,6 +318,10 @@ class Model(pl.LightningModule):
             self.log("train_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
             if self.args.task_type == "RUL":
+                self.log("train_point_loss", point_loss, on_step=False, on_epoch=True, prog_bar=False)
+                self.log("train_diff_loss", diff_loss, on_step=False, on_epoch=True, prog_bar=False)
+                self.log("train_curvature_loss", curvature_loss, on_step=False, on_epoch=True, prog_bar=False)
+                self.log("train_variance_loss", variance_loss, on_step=False, on_epoch=True, prog_bar=False)
                 self.train_rmse_orig.update(preds_orig, y_orig)
                 self.log("train_rmse_orig", self.train_rmse_orig, on_step=False, on_epoch=True, prog_bar=False)
 
@@ -261,6 +333,10 @@ class Model(pl.LightningModule):
             self.log("val_loss", loss, on_step=False, on_epoch=True, prog_bar=True)
 
             if self.args.task_type == "RUL":
+                self.log("val_point_loss", point_loss, on_step=False, on_epoch=True, prog_bar=False)
+                self.log("val_diff_loss", diff_loss, on_step=False, on_epoch=True, prog_bar=False)
+                self.log("val_curvature_loss", curvature_loss, on_step=False, on_epoch=True, prog_bar=False)
+                self.log("val_variance_loss", variance_loss, on_step=False, on_epoch=True, prog_bar=False)
                 self.val_rmse_orig.update(preds_orig, y_orig)
                 self.log("val_rmse_orig", self.val_rmse_orig, on_step=False, on_epoch=True, prog_bar=False)
 
@@ -281,6 +357,12 @@ class Model(pl.LightningModule):
 
                 self.test_preds.append(preds_np)
                 self.test_targets.append(y_np)
+
+                self.log("test_composite_loss", loss, on_step=False, on_epoch=True)
+                self.log("test_point_loss", point_loss, on_step=False, on_epoch=True)
+                self.log("test_diff_loss", diff_loss, on_step=False, on_epoch=True)
+                self.log("test_curvature_loss", curvature_loss, on_step=False, on_epoch=True)
+                self.log("test_variance_loss", variance_loss, on_step=False, on_epoch=True)
 
             self.log("test_loss", loss, on_step=False, on_epoch=True)
 
@@ -600,8 +682,9 @@ def main(args):
                                      filename="best")
         early_stop = EarlyStopping(monitor="train_f1_epoch", patience=args.patience, mode="max")
     elif args.task_type == 'RUL':
-        checkpoint = ModelCheckpoint(monitor="train_rmse", mode="min", save_top_k=1, dirpath=ckpt_dir, filename="best")
-        early_stop = EarlyStopping(monitor="train_rmse", patience=args.patience, mode="min")
+        # For RUL, use validation composite loss for model selection / early stopping.
+        checkpoint = ModelCheckpoint(monitor="val_loss", mode="min", save_top_k=1, dirpath=ckpt_dir, filename="best")
+        early_stop = EarlyStopping(monitor="val_loss", patience=args.patience, mode="min")
 
     tracker = MetricTrackerCallback(args.task_type)
 
@@ -718,6 +801,14 @@ if __name__ == "__main__":
     parser.add_argument('--wt_decay', type=float, default=1e-4)
     parser.add_argument('--random_seed', type=int, default=42)
     parser.add_argument('--task_type',type=str,default='FD',choices=['FD', 'RUL'])
+
+    # RUL composite loss weights
+    parser.add_argument('--huber_beta', type=float, default=1.0)
+    parser.add_argument('--point_loss_weight', type=float, default=1.0)
+    parser.add_argument('--diff_loss_weight', type=float, default=0.5)
+    parser.add_argument('--curvature_loss_weight', type=float, default=0.25)
+    parser.add_argument('--variance_loss_weight', type=float, default=0.1)
+
     args = parser.parse_args()
     apply_model_config(args)
     main(args)
